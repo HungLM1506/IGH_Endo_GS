@@ -9,292 +9,320 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import os
+import sys
+from PIL import Image
+from typing import NamedTuple
+from scene_nv.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
+    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
+from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
-import collections
-import struct
+import json
+from pathlib import Path
+from plyfile import PlyData, PlyElement
+from utils.sh_utils import SH2RGB
+from scene.gaussian_model import BasicPointCloud
 
-CameraModel = collections.namedtuple(
-    "CameraModel", ["model_id", "model_name", "num_params"])
-Camera = collections.namedtuple(
-    "Camera", ["id", "model", "width", "height", "params"])
-BaseImage = collections.namedtuple(
-    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
-Point3D = collections.namedtuple(
-    "Point3D", ["id", "xyz", "rgb", "error", "image_ids", "point2D_idxs"])
-CAMERA_MODELS = {
-    CameraModel(model_id=0, model_name="SIMPLE_PINHOLE", num_params=3),
-    CameraModel(model_id=1, model_name="PINHOLE", num_params=4),
-    CameraModel(model_id=2, model_name="SIMPLE_RADIAL", num_params=4),
-    CameraModel(model_id=3, model_name="RADIAL", num_params=5),
-    CameraModel(model_id=4, model_name="OPENCV", num_params=8),
-    CameraModel(model_id=5, model_name="OPENCV_FISHEYE", num_params=8),
-    CameraModel(model_id=6, model_name="FULL_OPENCV", num_params=12),
-    CameraModel(model_id=7, model_name="FOV", num_params=5),
-    CameraModel(model_id=8, model_name="SIMPLE_RADIAL_FISHEYE", num_params=4),
-    CameraModel(model_id=9, model_name="RADIAL_FISHEYE", num_params=5),
-    CameraModel(model_id=10, model_name="THIN_PRISM_FISHEYE", num_params=12)
+
+class CameraInfo(NamedTuple):
+    uid: int
+    R: np.array
+    T: np.array
+    FovY: np.array
+    FovX: np.array
+    image: np.array
+    image_path: str
+    image_name: str
+    width: int
+    height: int
+
+
+class SceneInfo(NamedTuple):
+    point_cloud: BasicPointCloud
+    train_cameras: list
+    test_cameras: list
+    nerf_normalization: dict
+    ply_path: str
+
+
+def getNerfppNorm(cam_info):  # (L.T.W.O.F)
+    def get_center_and_diag(cam_centers):
+        cam_centers = np.hstack(cam_centers)
+        avg_cam_center = np.mean(cam_centers, axis=1, keepdims=True)
+        center = avg_cam_center
+        dist = np.linalg.norm(cam_centers - center, axis=0, keepdims=True)
+        diagonal = np.max(dist)
+        return center.flatten(), diagonal
+
+    cam_centers = []
+
+    for cam in cam_info:
+        W2C = getWorld2View2(cam.R, cam.T)
+        C2W = np.linalg.inv(W2C)
+        cam_centers.append(C2W[:3, 3:4])
+
+    center, diagonal = get_center_and_diag(cam_centers)
+    radius = diagonal * 1.1
+
+    translate = -center
+
+    return {"translate": translate, "radius": radius}
+
+
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):  # (L.T.W.O.F)
+    cam_infos = []
+    for idx, key in enumerate(cam_extrinsics):
+        sys.stdout.write('\r')
+        # the exact output you're looking for:
+        sys.stdout.write(
+            "Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
+        sys.stdout.flush()
+
+        extr = cam_extrinsics[key]
+        intr = cam_intrinsics[extr.camera_id]
+        height = intr.height
+        width = intr.width
+
+        uid = intr.id
+        R = np.transpose(qvec2rotmat(extr.qvec))
+        T = np.array(extr.tvec)
+
+        if intr.model == "SIMPLE_PINHOLE":
+            focal_length_x = intr.params[0]
+            FovY = focal2fov(focal_length_x, height)
+            FovX = focal2fov(focal_length_x, width)
+        elif intr.model == "PINHOLE":
+            focal_length_x = intr.params[0]
+            focal_length_y = intr.params[1]
+            FovY = focal2fov(focal_length_y, height)
+            FovX = focal2fov(focal_length_x, width)
+        else:
+            assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
+
+        # image_path = os.path.join(images_folder, os.path.basename(extr.name))  # Don't need it (P.V.C.A.P)
+        # image_name = os.path.basename(image_path).split(".")[0]  # Don't need it (P.V.C.A.P)
+        # image = Image.open(image_path) # Don't need it (P.V.C.A.P)
+
+        # create blank image with height and width of cameras.txt file for  def loadCam(args, id, cam_info, resolution_scale): orig_w, orig_h = cam_info.image.size
+        # image = Image.new('RGB', (width, height), (255, 255, 255))
+
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=None,                   # earlier it was image=image then it was image=None (P.V.C.A.P)
+                              image_path=None, image_name=None, width=width, height=height)  # image_path=image_path,image_name=image_name (P.V.C.A.P)
+        cam_infos.append(cam_info)
+    sys.stdout.write('\n')
+    return cam_infos
+
+
+def fetchPly(path):
+    plydata = PlyData.read(path)
+    vertices = plydata['vertex']
+    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+    colors = np.vstack([vertices['red'], vertices['green'],
+                       vertices['blue']]).T / 255.0
+    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    return BasicPointCloud(points=positions, colors=colors, normals=normals)
+
+
+def storePly(path, xyz, rgb):
+    # Define the dtype for the structured array
+    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+             ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
+
+    normals = np.zeros_like(xyz)
+
+    elements = np.empty(xyz.shape[0], dtype=dtype)
+    attributes = np.concatenate((xyz, normals, rgb), axis=1)
+    elements[:] = list(map(tuple, attributes))
+
+    # Create the PlyData object and write to file
+    vertex_element = PlyElement.describe(elements, 'vertex')
+    ply_data = PlyData([vertex_element])
+    ply_data.write(path)
+
+
+def readColmapSceneInfo(path, images, eval, llffhold=8):
+    try:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    except:
+        cameras_extrinsic_file = os.path.join(
+            path, "images.txt")  # (L.T.W.O.F)
+        cameras_intrinsic_file = os.path.join(path, "cameras.txt")
+        cam_extrinsics = read_extrinsics_text(
+            cameras_extrinsic_file)  # (L.T.W.O.F)
+        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
+    reading_dir = "images" if images == None else images
+    cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))  # (L.T.W.O.F)
+    # x : x.image_name (changed by Pranav)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key=lambda x: x.uid)
+
+    if eval:
+        train_cam_infos = [c for idx, c in enumerate(
+            cam_infos) if idx % llffhold != 0]
+        test_cam_infos = [c for idx, c in enumerate(
+            cam_infos) if idx % llffhold == 0]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)  # (L.T.W.O.F)
+
+    # ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    # bin_path = os.path.join(path, "sparse/0/points3D.bin")
+    # txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    # if not os.path.exists(ply_path):
+    #     print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+    #     try:
+    #         xyz, rgb, _ = read_points3D_binary(bin_path)
+    #     except:
+    #         xyz, rgb, _ = read_points3D_text(txt_path)
+    #     storePly(ply_path, xyz, rgb)
+    # try:
+    #     pcd = fetchPly(ply_path)
+    # except:
+    #     pcd = None
+
+    scene_info = SceneInfo(point_cloud=None,  # point_cloud=pcd (changed by pranav)
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=None)  # ply_path=ply_path (changed by pranav)
+    return scene_info
+
+
+def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        fovx = contents["camera_angle_x"]
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(frames):
+            cam_name = os.path.join(path, frame["file_path"] + extension)
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            c2w[:3, 1:3] *= -1
+
+            # get the world-to-camera transform and set R, T
+            w2c = np.linalg.inv(c2w)
+            # R is stored transposed due to 'glm' in CUDA code
+            R = np.transpose(w2c[:3, :3])
+            T = w2c[:3, 3]
+
+            image_path = os.path.join(path, cam_name)
+            image_name = Path(cam_name).stem
+            image = Image.open(image_path)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array(
+                [1, 1, 1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:, :, :3] * norm_data[:, :,
+                                                  3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+            FovY = fovy
+            FovX = fovx
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                                        image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+
+    return cam_infos
+
+
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromTransforms(
+        path, "transforms_train.json", white_background, extension)
+    print("Reading Test Transforms")
+    test_cam_infos = readCamerasFromTransforms(
+        path, "transforms_test.json", white_background, extension)
+
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(
+            shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+
+def readEndoCustomInfo(datadir):
+    # load camera infos
+    from scene.endo_loader import EndoCustom_Dataset
+    endo_dataset = EndoCustom_Dataset(
+        data_dir=datadir,
+    )
+    train_cam_infos = endo_dataset.format_infos(split="train")
+    test_cam_infos = endo_dataset.format_infos(split="test")
+    video_cam_infos = endo_dataset.format_infos(split="video")
+
+    # get normalizations
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    # initialize sparse point clouds
+    ply_path = os.path.join(datadir, "points3d.ply")
+    xyz, rgb, normals = endo_dataset.get_init_pts()
+
+    normals = np.random.random((xyz.shape[0], 3))
+    pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals)
+    storePly(ply_path, xyz, rgb*255)
+
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    # get the maximum time
+    maxtime = endo_dataset.get_maxtime()
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           video_cameras=video_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           maxtime=maxtime)
+
+    return scene_info
+
+
+sceneLoadTypeCallbacks = {
+    "endo_custom": readEndoCustomInfo,
+    "Colmap": readColmapSceneInfo,  # (L.T.W.O.F)
+    "Blender": readNerfSyntheticInfo
 }
-CAMERA_MODEL_IDS = dict([(camera_model.model_id, camera_model)
-                         for camera_model in CAMERA_MODELS])
-CAMERA_MODEL_NAMES = dict([(camera_model.model_name, camera_model)
-                           for camera_model in CAMERA_MODELS])
-
-
-def qvec2rotmat(qvec):  # (L.T.W.O.F)
-    return np.array([
-        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
-         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
-         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
-        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
-         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
-         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
-        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
-         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
-         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
-
-
-def rotmat2qvec(R):
-    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
-    K = np.array([
-        [Rxx - Ryy - Rzz, 0, 0, 0],
-        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
-        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
-        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
-    eigvals, eigvecs = np.linalg.eigh(K)
-    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
-    if qvec[0] < 0:
-        qvec *= -1
-    return qvec
-
-
-class Image(BaseImage):
-    def qvec2rotmat(self):
-        return qvec2rotmat(self.qvec)
-
-
-def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
-    """Read and unpack the next bytes from a binary file.
-    :param fid:
-    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
-    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
-    :param endian_character: Any of {@, =, <, >, !}
-    :return: Tuple of read and unpacked values.
-    """
-    data = fid.read(num_bytes)
-    return struct.unpack(endian_character + format_char_sequence, data)
-
-
-def read_points3D_text(path):
-    """
-    see: src/base/reconstruction.cc
-        void Reconstruction::ReadPoints3DText(const std::string& path)
-        void Reconstruction::WritePoints3DText(const std::string& path)
-    """
-    xyzs = None
-    rgbs = None
-    errors = None
-    num_points = 0
-    with open(path, "r") as fid:
-        while True:
-            line = fid.readline()
-            if not line:
-                break
-            line = line.strip()
-            if len(line) > 0 and line[0] != "#":
-                num_points += 1
-
-    xyzs = np.empty((num_points, 3))
-    rgbs = np.empty((num_points, 3))
-    errors = np.empty((num_points, 1))
-    count = 0
-    with open(path, "r") as fid:
-        while True:
-            line = fid.readline()
-            if not line:
-                break
-            line = line.strip()
-            if len(line) > 0 and line[0] != "#":
-                elems = line.split()
-                xyz = np.array(tuple(map(float, elems[1:4])))
-                rgb = np.array(tuple(map(int, elems[4:7])))
-                error = np.array(float(elems[7]))
-                xyzs[count] = xyz
-                rgbs[count] = rgb
-                errors[count] = error
-                count += 1
-
-    return xyzs, rgbs, errors
-
-
-def read_points3D_binary(path_to_model_file):
-    """
-    see: src/base/reconstruction.cc
-        void Reconstruction::ReadPoints3DBinary(const std::string& path)
-        void Reconstruction::WritePoints3DBinary(const std::string& path)
-    """
-
-    with open(path_to_model_file, "rb") as fid:
-        num_points = read_next_bytes(fid, 8, "Q")[0]
-
-        xyzs = np.empty((num_points, 3))
-        rgbs = np.empty((num_points, 3))
-        errors = np.empty((num_points, 1))
-
-        for p_id in range(num_points):
-            binary_point_line_properties = read_next_bytes(
-                fid, num_bytes=43, format_char_sequence="QdddBBBd")
-            xyz = np.array(binary_point_line_properties[1:4])
-            rgb = np.array(binary_point_line_properties[4:7])
-            error = np.array(binary_point_line_properties[7])
-            track_length = read_next_bytes(
-                fid, num_bytes=8, format_char_sequence="Q")[0]
-            track_elems = read_next_bytes(
-                fid, num_bytes=8*track_length,
-                format_char_sequence="ii"*track_length)
-            xyzs[p_id] = xyz
-            rgbs[p_id] = rgb
-            errors[p_id] = error
-    return xyzs, rgbs, errors
-
-
-def read_intrinsics_text(path):
-    """
-    Taken from https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_model.py
-    """
-    cameras = {}
-    with open(path, "r") as fid:
-        while True:
-            line = fid.readline()
-            if not line:
-                break
-            line = line.strip()
-            if len(line) > 0 and line[0] != "#":
-                elems = line.split()
-                camera_id = int(elems[0])
-                model = elems[1]
-                assert model == "PINHOLE", "While the loader support other types, the rest of the code assumes PINHOLE"
-                width = int(elems[2])
-                height = int(elems[3])
-                params = np.array(tuple(map(float, elems[4:])))
-                cameras[camera_id] = Camera(id=camera_id, model=model,
-                                            width=width, height=height,
-                                            params=params)
-    return cameras
-
-
-def read_extrinsics_binary(path_to_model_file):
-    """
-    see: src/base/reconstruction.cc
-        void Reconstruction::ReadImagesBinary(const std::string& path)
-        void Reconstruction::WriteImagesBinary(const std::string& path)
-    """
-    images = {}
-    with open(path_to_model_file, "rb") as fid:
-        num_reg_images = read_next_bytes(fid, 8, "Q")[0]
-        for _ in range(num_reg_images):
-            binary_image_properties = read_next_bytes(
-                fid, num_bytes=64, format_char_sequence="idddddddi")
-            image_id = binary_image_properties[0]
-            qvec = np.array(binary_image_properties[1:5])
-            tvec = np.array(binary_image_properties[5:8])
-            camera_id = binary_image_properties[8]
-            image_name = ""
-            current_char = read_next_bytes(fid, 1, "c")[0]
-            while current_char != b"\x00":   # look for the ASCII 0 entry
-                image_name += current_char.decode("utf-8")
-                current_char = read_next_bytes(fid, 1, "c")[0]
-            num_points2D = read_next_bytes(fid, num_bytes=8,
-                                           format_char_sequence="Q")[0]
-            x_y_id_s = read_next_bytes(fid, num_bytes=24*num_points2D,
-                                       format_char_sequence="ddq"*num_points2D)
-            xys = np.column_stack([tuple(map(float, x_y_id_s[0::3])),
-                                   tuple(map(float, x_y_id_s[1::3]))])
-            point3D_ids = np.array(tuple(map(int, x_y_id_s[2::3])))
-            images[image_id] = Image(
-                id=image_id, qvec=qvec, tvec=tvec,
-                camera_id=camera_id, name=image_name,
-                xys=xys, point3D_ids=point3D_ids)
-    return images
-
-
-def read_intrinsics_binary(path_to_model_file):
-    """
-    see: src/base/reconstruction.cc
-        void Reconstruction::WriteCamerasBinary(const std::string& path)
-        void Reconstruction::ReadCamerasBinary(const std::string& path)
-    """
-    cameras = {}
-    with open(path_to_model_file, "rb") as fid:
-        num_cameras = read_next_bytes(fid, 8, "Q")[0]
-        for _ in range(num_cameras):
-            camera_properties = read_next_bytes(
-                fid, num_bytes=24, format_char_sequence="iiQQ")
-            camera_id = camera_properties[0]
-            model_id = camera_properties[1]
-            model_name = CAMERA_MODEL_IDS[camera_properties[1]].model_name
-            width = camera_properties[2]
-            height = camera_properties[3]
-            num_params = CAMERA_MODEL_IDS[model_id].num_params
-            params = read_next_bytes(fid, num_bytes=8*num_params,
-                                     format_char_sequence="d"*num_params)
-            cameras[camera_id] = Camera(id=camera_id,
-                                        model=model_name,
-                                        width=width,
-                                        height=height,
-                                        params=np.array(params))
-        assert len(cameras) == num_cameras
-    return cameras
-
-
-def read_extrinsics_text(path):
-    """
-    Taken from https://github.com/colmap/colmap/blob/dev/scripts/python/read_write_model.py
-    """
-    images = {}
-    with open(path, "r") as fid:
-        while True:
-            line = fid.readline()
-            if not line:
-                break
-            line = line.strip()
-            if len(line) > 0 and line[0] != "#":
-                elems = line.split()
-                image_id = int(elems[0])
-                qvec = np.array(tuple(map(float, elems[1:5])))
-                tvec = np.array(tuple(map(float, elems[5:8])))
-                camera_id = int(elems[8])
-                # image_name = elems[9] ##(changed by pranav)
-                # elems = fid.readline().split() ##(changed by pranav)
-                # xys = np.column_stack([tuple(map(float, elems[0::3])),  ##(changed by pranav)
-                # tuple(map(float, elems[1::3]))])   ##(changed by pranav)
-                # point3D_ids = np.array(tuple(map(int, elems[2::3])))    ##(changed by pranav)
-                images[image_id] = Image(
-                    id=image_id, qvec=qvec, tvec=tvec,
-                    # name=image_name ##(changed by pranav)(changed by pranav)
-                    camera_id=camera_id, name=None,
-                    xys=None, point3D_ids=None)  # xys=xys, point3D_ids=point3D_ids ##(changed by pranav)
-    return images
-
-
-def read_colmap_bin_array(path):
-    """
-    Taken from https://github.com/colmap/colmap/blob/dev/scripts/python/read_dense.py
-
-    :param path: path to the colmap binary file.
-    :return: nd array with the floating point values in the value
-    """
-    with open(path, "rb") as fid:
-        width, height, channels = np.genfromtxt(fid, delimiter="&", max_rows=1,
-                                                usecols=(0, 1, 2), dtype=int)
-        fid.seek(0)
-        num_delimiter = 0
-        byte = fid.read(1)
-        while True:
-            if byte == b"&":
-                num_delimiter += 1
-                if num_delimiter >= 3:
-                    break
-            byte = fid.read(1)
-        array = np.fromfile(fid, np.float32)
-    array = array.reshape((width, height, channels), order="F")
-    return np.transpose(array, (1, 0, 2)).squeeze()
