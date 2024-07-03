@@ -48,6 +48,10 @@ class Scene:
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](
                 args.source_path, args.white_background, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "poses_bounds.npy")) and args.extra_mark == 'endo_custom':
+            scene_info = sceneLoadTypeCallbacks["endo_custom"](
+                args.source_path)
+            print("Found poses_bounds.py and extra marks with custom_endo")
         else:
             assert False, "Could not recognize scene type!"
 
