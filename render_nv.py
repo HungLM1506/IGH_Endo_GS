@@ -1,6 +1,6 @@
 
 import torch
-from scene import Scene
+from scene_nv import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
@@ -11,8 +11,9 @@ from argparse import ArgumentParser
 from arguments_nv import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 
+
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
-    render_path = os.path.join(model_path,"renders")
+    render_path = os.path.join(model_path, "renders")
     # gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt") # GT isnt present for Unknown poses (P.V.C.A.P)
 
     makedirs(render_path, exist_ok=True)
@@ -32,34 +33,41 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
         # print("full_proj_transform:", view.full_proj_transform, "Type:", type(view.full_proj_transform)) #(P.V.C.A.P)
         # print("camera_center:", view.camera_center, "Type:", type(view.camera_center)) #(P.V.C.A.P)
 
-        rendering = render(view, gaussians, pipeline, background)["render"]  #(L.T.W.O.F)
+        rendering = render(view, gaussians, pipeline, background)[
+            "render"]  # (L.T.W.O.F)
         # gt = view.original_image[0:3, :, :] #No need of GT for unknown camera poses it doesnt exist (P.V.C.A.P)
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(rendering, os.path.join(
+            render_path, '{0:05d}'.format(idx) + ".png"))
         # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png")) #No need of GT for unknown camera poses it doesnt exist (P.V.C.A.P)
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
+
+def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool):
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
+        scene = Scene(dataset, gaussians,
+                      load_iteration=iteration, shuffle=False)
         # Print data type and details about train_cameras
         # train_cameras = scene.getTrainCameras()
         # print(f"Type: {type(train_cameras)}, Size: {len(train_cameras)}")
         # print(train_cameras)
-        
+
         # if len(train_cameras) > 0:
         #     for i, camera in enumerate(train_cameras):
         #         print(f"\nCamera {i} attributes:")
         #         for attr_name, attr_value in vars(camera).items():
         #             print(f"{attr_name}: {attr_value} Type: {type(attr_value)}")
 
-        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+        bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, background) #(L.T.W.O.F)
+            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(
+            ), gaussians, pipeline, background)  # (L.T.W.O.F)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipeline, background)
+            render_set(dataset.model_path, "test", scene.loaded_iter,
+                       scene.getTestCameras(), gaussians, pipeline, background)
+
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -76,4 +84,5 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+    render_sets(model.extract(args), args.iteration,
+                pipeline.extract(args), args.skip_train, args.skip_test)
