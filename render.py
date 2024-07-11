@@ -144,8 +144,8 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     camera_parameters = (focal_x, focal_y, width, height)
 
     if reconstruct:
-        reconstruct_point_cloud(render_images, mask_list,
-                                render_depths, camera_parameters, name)
+        reconstruct_point_cloud(
+            render_images, render_depths, camera_parameters, name)
 
 
 def render_sets(dataset: ModelParams, hyperparam, iteration: int, pipeline: PipelineParams, skip_train: bool, skip_test: bool, skip_video: bool, reconstruct: bool):
@@ -186,8 +186,8 @@ def reconstruct_point_cloud(images, masks, depths, camera_parameters, name):
             0, 255).permute(1, 2, 0).contiguous().to("cpu").numpy()
         depth_np = depths[i_frame].cpu().numpy()
         depth_np = depth_np.squeeze(0)
-        mask = masks[i_frame]
-        mask = mask.squeeze(0).cpu().numpy()
+        # mask = masks[i_frame]
+        # mask = mask.squeeze(0).cpu().numpy()
 
         rgb_new = copy.deepcopy(rgb_np)
 
