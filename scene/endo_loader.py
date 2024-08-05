@@ -48,11 +48,11 @@ class EndoNeRF_Dataset(object):
         datadir,
         downsample=1.0,
         test_every=8,
-        mode='binocular'
+        mode='monocular'
     ):
         self.img_wh = (
-            int(640 / downsample),
-            int(512 / downsample),
+            int(1125 / downsample),
+            int(700 / downsample),
         )
         self.root_dir = datadir
         self.downsample = downsample 
@@ -88,6 +88,7 @@ class EndoNeRF_Dataset(object):
         # poses = np.concatenate([poses[..., :1], -poses[..., 1:2], -poses[..., 2:3], poses[..., 3:4]], -1)
         poses = np.concatenate([poses[..., :1], poses[..., 1:2], poses[..., 2:3], poses[..., 3:4]], -1)
         
+        
         # prepare poses
         self.image_poses = []
         self.image_times = []
@@ -107,10 +108,11 @@ class EndoNeRF_Dataset(object):
         if self.mode == 'binocular':
             self.depth_paths = agg_fn("depth")
         elif self.mode == 'monocular':
-            self.depth_paths = agg_fn("monodepth")
+            self.depth_paths = agg_fn("depth")
         else:
             raise ValueError(f"{self.mode} has not been implemented.")
         self.masks_paths = agg_fn("masks")
+        
 
         assert len(self.image_paths) == poses.shape[0], "the number of images should equal to the number of poses"
         assert len(self.depth_paths) == poses.shape[0], "the number of depth images should equal to number of poses"
@@ -186,6 +188,9 @@ class EndoNeRF_Dataset(object):
             color, depth, mask = self.get_color_depth_mask(0, mode=self.mode)
             pts, colors, _ = self.get_pts_cam(depth, mask, color, disable_mask=False)
             pts = self.get_pts_wld(pts, self.image_poses[0])
+            num_pts = pts.shape[0]
+            sel_idxs = fpsample.bucket_fps_kdline_sampling(pts,int(0.01*num_pts),h=3)
+            pts, colors = pts[sel_idxs], colors[sel_idxs]
             normals = np.zeros((pts.shape[0], 3))
         
         return pts, colors, normals
@@ -570,6 +575,7 @@ class EndoCustom_Dataset(object):
 
         self.image_paths = agg_fn('images')
         self.depth_paths = agg_fn('depth')
+        # self.masks_paths = agg_fn("masks")
         # print(self.image_paths)
         # assert len(
         #     self.image_paths) == poses.shape[0], "the number of images should equal to the number of poses"

@@ -21,7 +21,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from scene.deformation import deform_network
+from scene.deformation_using_attention import deform_network
 from scene.regulation import compute_plane_smoothness
 
 

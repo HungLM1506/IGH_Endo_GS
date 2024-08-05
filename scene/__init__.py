@@ -56,6 +56,8 @@ class Scene:
         else:
             assert False, "Could not recognize scene type!"
 
+        self.dataset_type = None
+
         self.maxtime = scene_info.maxtime
         self.cameras_extent = scene_info.nerf_normalization["radius"]
         print("self.cameras_extent is ", self.cameras_extent)

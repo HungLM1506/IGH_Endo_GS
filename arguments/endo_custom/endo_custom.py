@@ -1,6 +1,7 @@
 ModelParams = dict(
-    extra_mark='endo_custom',
-    camera_extent=10
+    extra_mark='endonerf',
+    camera_extent=10,
+    mode='monocular'
 )
 
 OptimizationParams = dict(
@@ -10,7 +11,7 @@ OptimizationParams = dict(
     deformation_lr_delay_mult=0.01,
     grid_lr_init=0.0016,
     grid_lr_final=0.000016,
-    iterations=15000,
+    iterations=6000,
     percent_dense=0.01,
     opacity_reset_interval=3000,
     position_lr_max_steps=4000,
@@ -32,3 +33,5 @@ ModelHiddenParams = dict(
     l1_time_planes=0,
     weight_decay_iteration=0,
 )
+
+
