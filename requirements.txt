@@ -1,7 +1,0 @@
-mmcv==1.6.0
-lpips
-plyfile
-imageio-ffmpeg
-imageio
-open3d
-torchmetrics
