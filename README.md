@@ -43,6 +43,8 @@ IGH_ENDO_GS/
 
 ## Installation
 
+In our environment, we use pytorch=1.13.1, and the CUDA compile version is 11.8.
+
 ```bash
 git clone git@github.com:HungLM1506/IGH_Endo_GS.git
 cd IGH_Endo_GS
@@ -60,14 +62,21 @@ pip install -e submodules/simple-knn
 **EndoNeRF:**  
 The dataset provided in [EndoNeRF](https://arxiv.org/abs/2206.15255) is used. You can download and process the dataset from their website (https://github.com/med-air/EndoNeRF). We use the two accessible clips including 'pulling_soft_tissues' and 'cutting_tissues_twice'.
 
+**IGH Dataset:**  
+The dataset is provided by Hoang Long clinic, a specialized clinic for the treatment of digestive and hepatobiliary diseases. this dataset is intended for experimental use only and must not be officially published.
+
 ## Trainning
 
-comming soon
+```sh
+bash train.sh
+```
 
 ## Evaluating
 
-comming soon
+```bash
+python metrics.py --model_path output/endonerf/pulling
+```
 
 ## Acknowledgments
 
-comming soon
+This project is based on [3DGS](https://github.com/graphdeco-inria/gaussian-splatting), [4DGS](https://github.com/hustvl/4DGaussians), [EndoNeRF](https://github.com/med-air/EndoNeRF) and [Hexplane](https://github.com/Caoang327/HexPlane). Thanks for publishing their wonderful works with codes.
